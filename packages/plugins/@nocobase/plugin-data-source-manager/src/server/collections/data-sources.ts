@@ -27,8 +27,25 @@ export default defineCollection({
       name: 'displayName',
     },
     {
+      name: 'type', // 合併後的 type 欄位
       type: 'string',
-      name: 'type',
+      allowNull: false,
+      uiSchema: {
+        type: 'string',
+        title: '{{t("Storage type")}}',
+        'x-component': 'Select',
+        'x-component-props': {
+          popupMatchSelectWidth: false,
+        },
+        enum: [
+          { label: 'Main Database', value: 'main' },
+          { label: 'MySQL', value: 'mysql' },
+          { label: 'MariaDB', value: 'mariadb' },
+          { label: 'PostgreSQL', value: 'postgres' },
+          { label: 'SQLite', value: 'sqlite' },
+          { label: 'MSSQL Server', value: 'mssql' }, // 新增這行
+        ],
+      },
     },
     {
       type: 'json',

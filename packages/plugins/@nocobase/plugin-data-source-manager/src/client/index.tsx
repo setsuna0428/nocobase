@@ -7,7 +7,7 @@
  * For more information, please refer to: https://www.nocobase.com/agreement.
  */
 
-import { lazy, Plugin } from '@nocobase/client';
+import { lazy, Plugin, SchemaComponent } from '@nocobase/client';
 import PluginACLClient from '@nocobase/plugin-acl/client';
 import { uid } from '@nocobase/utils/client';
 import React from 'react';
@@ -16,6 +16,8 @@ const { DatabaseConnectionProvider } = lazy(() => import('./DatabaseConnectionPr
 
 import { ThirdDataSource } from './ThridDataSource';
 import { NAMESPACE } from './locale';
+import { useTestConnectionAction } from './hooks'; // 導入 useTestConnectionAction
+
 // import { BreadcumbTitle } from './component/BreadcumbTitle';
 const { BreadcumbTitle } = lazy(() => import('./component/BreadcumbTitle'), 'BreadcumbTitle');
 
@@ -38,6 +40,82 @@ const { CollectionMainProvider } = lazy(
   () => import('./component/MainDataSourceManager/CollectionMainProvider'),
   'CollectionMainProvider',
 );
+
+// MSSQL 資料源設定表單組件
+const MSSQLDataSourceSettingsForm = (props) => {
+  const { from, CollectionsTableField, loadCollections } = props;
+
+  const schema = {
+    type: 'object',
+    properties: {
+      displayName: {
+        type: 'string',
+        title: `{{t("Data source display name", { ns: "${NAMESPACE}" })}}`,
+        'x-component': 'Input',
+        'x-decorator': 'FormItem',
+        required: true,
+        'x-disabled': from === 'edit',
+      },
+      options: {
+        type: 'object',
+        'x-component': 'fieldset',
+        properties: {
+          host: {
+            type: 'string',
+            title: '{{t("Host")}}',
+            'x-component': 'Input',
+            'x-decorator': 'FormItem',
+            required: true,
+            default: 'localhost',
+          },
+          port: {
+            type: 'number',
+            title: '{{t("Port")}}',
+            'x-component': 'InputNumber',
+            'x-decorator': 'FormItem',
+            default: 1433,
+          },
+          username: {
+            type: 'string',
+            title: '{{t("Username")}}',
+            'x-component': 'Input',
+            'x-decorator': 'FormItem',
+            required: true,
+          },
+          password: {
+            type: 'string',
+            title: '{{t("Password")}}',
+            'x-component': 'Password',
+            'x-decorator': 'FormItem',
+            required: true,
+          },
+          database: {
+            type: 'string',
+            title: '{{t("Database")}}',
+            'x-component': 'Input',
+            'x-decorator': 'FormItem',
+            required: true,
+          },
+          schema: {
+            type: 'string',
+            title: '{{t("Schema")}}',
+            'x-component': 'Input',
+            'x-decorator': 'FormItem',
+            default: 'dbo',
+            description: '{{t("Default schema name, usually \\"dbo\\"")}}',
+          },
+        },
+      },
+    },
+  };
+
+  // 提供正確的 scope，包含測試連接功能
+  const scope = {
+    useTestConnectionAction,
+  };
+
+  return <SchemaComponent schema={schema} scope={scope} />;
+};
 
 export class PluginDataSourceManagerClient extends Plugin {
   types = new Map();
@@ -106,12 +184,6 @@ export class PluginDataSourceManagerClient extends Plugin {
       skipAclConfigure: true,
       aclSnippet: 'pm.data-source-manager.data-source-main',
     });
-    // this.app.pluginSettingsManager.add(`${NAMESPACE}/main.permissions`, {
-    //   title: `{{t("Permissions", { ns: "${NAMESPACE}" })}}`,
-    //   Component: PermissionManager,
-    //   topLevelName: `${NAMESPACE}/main`,
-    //   pluginKey: NAMESPACE,
-    // });
     this.app.pluginSettingsManager.add(`${NAMESPACE}/:name.collections`, {
       title: `{{t("Collections", { ns: "${NAMESPACE}" })}}`,
       Component: CollectionManagerPage,
@@ -120,45 +192,56 @@ export class PluginDataSourceManagerClient extends Plugin {
       skipAclConfigure: true,
       aclSnippet: 'pm.data-source-manager.data-source-main',
     });
-    // this.app.pluginSettingsManager.add(`${NAMESPACE}/:name.permissions`, {
-    //   title: `{{t("Permissions", { ns: "${NAMESPACE}" })}}`,
-    //   Component: PermissionManager,
-    //   topLevelName: `${NAMESPACE}/:name`,
-    //   pluginKey: NAMESPACE,
-    // });
 
     this.app.dataSourceManager.addDataSources(this.getThirdDataSource.bind(this), ThirdDataSource);
-    // this.setDataSources();
+
+    // ========== 註冊 MSSQL 資料源類型 ==========
+    this.registerType('mssql', {
+      name: 'mssql',
+      label: '{{t("MSSQL Server")}}',
+      authType: 'password',
+      DataSourceSettingsForm: MSSQLDataSourceSettingsForm,
+    });
+    // ========== MSSQL 註冊代碼結束 ==========
   }
 
   async setDataSources() {
-    const allDataSources = await this.app.apiClient.request<{
-      data: any;
-    }>({
-      resource: 'dataSources',
-      action: 'listEnabled',
-      params: {
-        paginate: false,
-        // appends: ['collections'],
-      },
-    });
+    try {
+      const allDataSources = await this.app.apiClient.request<{
+        data: any;
+      }>({
+        resource: 'dataSources',
+        action: 'listEnabled',
+        params: {
+          paginate: false,
+        },
+      });
 
-    return allDataSources?.data?.data;
+      return allDataSources?.data?.data || [];
+    } catch (error) {
+      console.error('Failed to load data sources:', error);
+      return [];
+    }
   }
 
   async getThirdDataSource() {
-    const service = await this.app.apiClient.request<{
-      data: any;
-    }>({
-      resource: 'dataSources',
-      action: 'listEnabled',
-      params: {
-        paginate: false,
-        appends: ['collections'],
-      },
-    });
+    try {
+      const service = await this.app.apiClient.request<{
+        data: any;
+      }>({
+        resource: 'dataSources',
+        action: 'listEnabled',
+        params: {
+          paginate: false,
+          appends: ['collections'],
+        },
+      });
 
-    return service?.data?.data;
+      return service?.data?.data || [];
+    } catch (error) {
+      console.error('Failed to load third data sources:', error);
+      return [];
+    }
   }
 
   registerType(name: string, options) {

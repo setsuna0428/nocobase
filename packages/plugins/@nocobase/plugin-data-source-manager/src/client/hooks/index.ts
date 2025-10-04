@@ -13,6 +13,8 @@ import { useTranslation } from 'react-i18next';
 import { useActionContext, useAPIClient } from '@nocobase/client';
 import { NAMESPACE } from '../locale';
 
+export * from './useMSSQLConnection';
+
 export const useCreateDatabaseServer = (handleDataServerChange) => {
   const form = useForm();
   const ctx = useActionContext();
@@ -44,26 +46,56 @@ export const useCreateDatabaseServer = (handleDataServerChange) => {
 };
 
 export const useTestConnectionAction = () => {
-  const form = useForm();
-  const api = useAPIClient();
   const { t } = useTranslation();
-  const actionField = useField();
-  actionField.data = actionField.data || {};
+  const apiClient = useAPIClient();
+  const form = useForm();
+  
   return {
     async run() {
-      await form.submit();
+      const values = form.values;
+      
       try {
-        actionField.data.loading = true;
-        await api.resource('dataSources').testConnection({
-          values: {
-            ...form.values,
+        // 根據類型調整測試連接參數
+        let testParams = {
+          type: values.type,
+          options: values.options,
+        };
+
+        // MSSQL 特殊處理
+        if (values.type === 'mssql') {
+          testParams = {
+            type: 'mssql',
+            options: {
+              ...values.options,
+              dialectOptions: {
+                options: {
+                  trustServerCertificate: values.options?.dialectOptions?.trustServerCertificate ?? true,
+                  encrypt: values.options?.dialectOptions?.encrypt ?? false,
+                  connectionTimeout: values.options?.dialectOptions?.connectionTimeout || 30000,
+                  enableArithAbort: true,
+                },
+              },
+            },
+          };
+        }
+
+        const response = await apiClient.request({
+          resource: 'dataSources',
+          action: 'testConnection',
+          params: {
+            values: testParams,
           },
         });
-        actionField.data.loading = false;
-        message.success(t('Connection successful', { ns: NAMESPACE }));
+
+        // 修正：檢查 HTTP 狀態和回應內容
+        if (response.status === 200 || response.data?.success !== false) {
+          message.success(t('Test connection successful', { ns: NAMESPACE }));
+        } else {
+          message.error(response.data?.error || t('Test connection failed', { ns: NAMESPACE }));
+        }
       } catch (error) {
-        actionField.data.loading = false;
-        console.log(error);
+        console.error('Connection test error:', error);
+        message.error(error.message || t('Test connection failed', { ns: NAMESPACE }));
       }
     },
   };

@@ -1,0 +1,17 @@
+{
+  "MSSQL Server": "MSSQL 服務器",
+  "Host": "主機",
+  "Port": "端口",
+  "Username": "用戶名",
+  "Password": "密碼", 
+  "Database": "資料庫",
+  "Schema": "架構",
+  "Advanced Options": "進階選項",
+  "Trust Server Certificate": "信任服務器憑證",
+  "Enable Encryption": "啟用加密",
+  "Connection Timeout (ms)": "連接超時 (毫秒)",
+  "Default schema name, usually \"dbo\"": "預設架構名稱，通常為 \"dbo\"",
+  "Test connection successful": "連接測試成功",
+  "Test connection failed": "連接測試失敗",
+  "MSSQL connection test passed": "MSSQL 連接測試通過"
+}

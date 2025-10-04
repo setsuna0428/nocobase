@@ -39,6 +39,14 @@ export class PluginDataSourceManagerServer extends Plugin {
     [dataSourceKey: string]: DataSourceState;
   } = {};
 
+  public dataSourceLoadingProgress: {
+    [dataSourceKey: string]: LoadingProgress;
+  } = {};
+
+  renderJsonTemplate(template) {
+    return this.app.environment.renderJsonTemplate(template);
+  }
+
   async handleSyncMessage(message) {
     const { type } = message;
     if (type === 'syncRole') {
@@ -129,15 +137,68 @@ export class PluginDataSourceManagerServer extends Plugin {
     }
   }
 
-  public dataSourceLoadingProgress: {
-    [dataSourceKey: string]: LoadingProgress;
-  } = {};
-
-  renderJsonTemplate(template) {
-    return this.app.environment.renderJsonTemplate(template);
-  }
-
   async beforeLoad() {
+    const self = this;
+    
+    // ========== 註冊 MSSQL 資料源類型 ==========
+    this.app.dataSourceManager.factory.register('mssql', class MSSQLDataSource extends (require('@nocobase/data-source-manager').SequelizeDataSource) {
+      static async testConnection(options: any) {
+        const { Database } = require('@nocobase/database');
+        
+        // 處理 MSSQL 連接選項
+        const mssqlOptions = {
+          ...options,
+          dialect: 'mssql',
+          logging: false,
+          dialectOptions: {
+            options: {
+              trustServerCertificate: true,
+              enableArithAbort: true,
+              encrypt: false,
+            },
+            ...options.dialectOptions,
+          },
+        };
+
+        try {
+          const testDb = new Database(mssqlOptions);
+          await testDb.auth();
+          
+          // 測試查詢功能
+          await testDb.sequelize.query('SELECT 1 as test', { 
+            type: testDb.sequelize.QueryTypes.SELECT 
+          });
+          
+          await testDb.close();
+          
+          return { success: true, message: 'MSSQL connection test passed' };
+        } catch (error) {
+          throw new Error(`MSSQL connection test failed: ${error.message}`);
+        }
+      }
+
+      async load() {
+        // 確保 MSSQL 特有的設置
+        if (!this.options.dialectOptions) {
+          this.options.dialectOptions = {};
+        }
+
+        if (!this.options.dialectOptions.options) {
+          this.options.dialectOptions.options = {};
+        }
+
+        // 設置 MSSQL 預設選項
+        this.options.dialectOptions.options = {
+          trustServerCertificate: true,
+          enableArithAbort: true,
+          encrypt: false,
+          ...this.options.dialectOptions.options,
+        };
+
+        return await super.load();
+      }
+    });
+
     this.app.db.registerModels({
       DataSourcesCollectionModel,
       DataSourcesFieldModel,
@@ -147,6 +208,7 @@ export class PluginDataSourceManagerServer extends Plugin {
       DataSourceModel,
     });
 
+    // 現有的事件監聽器設置...
     this.app.db.on('dataSourcesFields.beforeCreate', async (model, options) => {
       const validatePresent = (name: string) => {
         if (!model.get(name)) {
@@ -177,6 +239,7 @@ export class PluginDataSourceManagerServer extends Plugin {
       }
     });
 
+    // 其他現有的事件監聽器...
     this.app.db.on('dataSources.beforeCreate', async (model: DataSourceModel, options) => {
       this.dataSourceStatus[model.get('key')] = 'loading';
     });
@@ -200,92 +263,11 @@ export class PluginDataSourceManagerServer extends Plugin {
       }
     });
 
-    this.app.db.on('dataSources.afterSave', async (model: DataSourceModel, options) => {
-      if (model.changed('options') && !model.isMainRecord()) {
-        model.loadIntoApplication({
-          app: this.app,
-          refresh: true,
-        });
-
-        this.sendSyncMessage(
-          {
-            type: 'loadDataSource',
-            dataSourceKey: model.get('key'),
-          },
-          {
-            transaction: options.transaction,
-          },
-        );
-      }
-    });
-
-    this.app.db.on('dataSources.afterCreate', async (model: DataSourceModel, options) => {
-      if (model.isMainRecord()) {
-        return;
-      }
-
-      const { transaction } = options;
-      await this.app.db.getRepository('dataSourcesRolesResourcesScopes').create({
-        values: {
-          dataSourceKey: model.get('key'),
-          key: 'all',
-          name: '{{t("All records")}}',
-          scope: {},
-        },
-        transaction,
-      });
-    });
-
-    const app = this.app;
-
-    this.app.use(async function setDataSourceListItemStatus(ctx, next) {
-      await next();
-      if (!ctx.action) {
-        return;
-      }
-
-      const { actionName, resourceName, params } = ctx.action;
-
-      if (resourceName === 'dataSources' && actionName == 'list') {
-        let dataPath = 'body';
-
-        if (Array.isArray(ctx.body['data'])) {
-          dataPath = 'body.data';
-        }
-
-        const items = lodash.get(ctx, dataPath);
-
-        if (!Array.isArray(items)) {
-          return;
-        }
-
-        lodash.set(
-          ctx,
-          dataPath,
-          items.map((item) => {
-            const data = item.toJSON();
-            if (item.isMainRecord()) {
-              data['status'] = 'loaded';
-              return data;
-            }
-
-            const dataSourceStatus = plugin.dataSourceStatus[item.get('key')];
-            data['status'] = dataSourceStatus;
-
-            if (dataSourceStatus === 'loading-failed' || dataSourceStatus === 'reloading-failed') {
-              data['errorMessage'] = plugin.dataSourceErrors[item.get('key')].message;
-            }
-
-            return data;
-          }),
-        );
-      }
-    });
-
+    // ========== 添加 Actions ==========
     const plugin = this;
 
     const mapDataSourceWithCollection = (dataSourceModel, appendCollections = true) => {
-      const dataSource = app.dataSourceManager.dataSources.get(dataSourceModel.get('key'));
+      const dataSource = this.app.dataSourceManager.dataSources.get(dataSourceModel.get('key'));
       const dataSourceStatus = plugin.dataSourceStatus[dataSourceModel.get('key')];
 
       const item: any = {
@@ -293,8 +275,6 @@ export class PluginDataSourceManagerServer extends Plugin {
         displayName: dataSourceModel.get('displayName'),
         status: dataSourceStatus,
         type: dataSourceModel.get('type'),
-
-        // @ts-ignore
         isDBInstance: !!dataSource?.collectionManager.db,
       };
 
@@ -340,85 +320,6 @@ export class PluginDataSourceManagerServer extends Plugin {
       return item;
     };
 
-    this.app.resourceManager.use(async function setDataSourceListDefaultSort(ctx, next) {
-      if (!ctx.action) {
-        await next();
-        return;
-      }
-
-      const { actionName, resourceName, params } = ctx.action;
-
-      if (resourceName === 'dataSources' && actionName == 'list') {
-        if (!params.sort) {
-          params.sort = ['-fixed', 'createdAt'];
-        }
-      }
-
-      await next();
-    });
-
-    this.app.resourceManager.use(async function verifyDatasourceCollectionsCount(ctx, next) {
-      if (!ctx.action) {
-        await next();
-        return;
-      }
-
-      const { actionName, resourceName, params } = ctx.action;
-      if (resourceName === 'dataSources' && (actionName === 'add' || actionName === 'update')) {
-        const { values, filterByTk: dataSourceKey } = params;
-        if (values.options?.addAllCollections) {
-          let introspector: { getCollections: () => Promise<string[]> } = null;
-          const dataSourceManager = ctx.app['dataSourceManager'] as DataSourceManager;
-
-          if (actionName === 'add') {
-            const klass = dataSourceManager.factory.getClass(values.options.type);
-            // @ts-ignore
-            const dataSource = new klass(dbOptions);
-            introspector = dataSource.collectionManager.dataSource.createDatabaseIntrospector(
-              dataSource.collectionManager.db,
-            );
-          } else {
-            const dataSource = dataSourceManager.dataSources.get(dataSourceKey);
-            if (!dataSource) {
-              throw new Error(`dataSource ${dataSourceKey} not found`);
-            }
-            introspector = dataSource['introspector'];
-          }
-          const allCollections = await introspector.getCollections();
-          if (allCollections.length > ALLOW_MAX_COLLECTIONS_COUNT) {
-            throw new Error(
-              `The number of collections exceeds the limit of ${ALLOW_MAX_COLLECTIONS_COUNT}. Please remove some collections before adding new ones.`,
-            );
-          }
-        }
-      }
-      await next();
-    });
-
-    this.app.use(async function handleAppendDataSourceCollection(ctx, next) {
-      await next();
-
-      if (!ctx.action) {
-        return;
-      }
-
-      const { actionName, resourceName, params } = ctx.action;
-
-      if (resourceName === 'dataSources' && actionName == 'get') {
-        let appendCollections = false;
-        const appends = ctx.action.params.appends;
-        if (appends && appends.includes('collections')) {
-          appendCollections = true;
-        }
-        if (ctx.body.data) {
-          ctx.body.data = mapDataSourceWithCollection(ctx.body.data, appendCollections);
-        } else {
-          ctx.body = mapDataSourceWithCollection(ctx.body, appendCollections);
-        }
-      }
-    });
-
-    const self = this;
     this.app.actions({
       async ['dataSources:listEnabled'](ctx, next) {
         const dataSources = await ctx.db.getRepository('dataSources').find({
@@ -437,20 +338,53 @@ export class PluginDataSourceManagerServer extends Plugin {
 
       async ['dataSources:testConnection'](ctx, next) {
         const { values } = ctx.action.params;
-
         const { options, type } = values;
 
         const klass = ctx.app.dataSourceManager.factory.getClass(type);
 
+        if (!klass) {
+          throw new Error(`Data source type "${type}" is not supported`);
+        }
+
         try {
-          await klass.testConnection(self.renderJsonTemplate(options));
+          // 對 MSSQL 進行特殊處理
+          if (type === 'mssql') {
+            const { Database } = require('@nocobase/database');
+            
+            // 使用 MSSQL 特有的連接選項
+            const mssqlOptions = {
+              ...self.renderJsonTemplate(options),
+              dialect: 'mssql',
+              logging: false,
+              dialectOptions: {
+                options: {
+                  trustServerCertificate: true,
+                  enableArithAbort: true,
+                  encrypt: false, // 根據實際需求調整
+                },
+                ...self.renderJsonTemplate(options).dialectOptions,
+              },
+            };
+
+            // 創建測試資料庫連接
+            const testDb = new Database(mssqlOptions);
+            await testDb.auth();
+            await testDb.close();
+            
+            ctx.body = {
+              success: true,
+              message: 'MSSQL connection successful',
+            };
+          } else {
+            // 其他資料庫類型的測試連接
+            await klass.testConnection(self.renderJsonTemplate(options));
+            ctx.body = {
+              success: true,
+            };
+          }
         } catch (error) {
           throw new Error(`Test connection failed: ${error.message}`);
         }
-
-        ctx.body = {
-          success: true,
-        };
 
         await next();
       },
@@ -497,300 +431,6 @@ export class PluginDataSourceManagerServer extends Plugin {
 
     this.app.resourcer.define({
       name: 'dataSources',
-    });
-
-    this.app.db.on('dataSourcesFields.beforeSave', async (model: DataSourcesFieldModel, options) => {
-      const { transaction } = options;
-      if (!model.get('collectionName') || !model.get('dataSourceKey')) {
-        const collectionKey = model.get('collectionKey');
-        if (!collectionKey) {
-          throw new Error('collectionKey is required');
-        }
-
-        const collection = await model.getCollection({ transaction });
-
-        model.set('collectionName', collection.get('name'));
-        model.set('dataSourceKey', collection.get('dataSourceKey'));
-      }
-    });
-
-    this.app.db.on('dataSourcesCollections.afterDestroy', async (model: DataSourcesCollectionModel, options) => {
-      const dataSource = this.app.dataSourceManager.dataSources.get(model.get('dataSourceKey'));
-      if (dataSource) {
-        dataSource.collectionManager.removeCollection(model.get('name'));
-      }
-
-      this.sendSyncMessage(
-        {
-          type: 'removeDataSourceCollection',
-          dataSourceKey: model.get('dataSourceKey'),
-          collectionName: model.get('name'),
-        },
-        {
-          transaction: options.transaction,
-        },
-      );
-    });
-
-    this.app.db.on('dataSourcesFields.afterSaveWithAssociations', async (model: DataSourcesFieldModel, options) => {
-      model.load({
-        app: this.app,
-      });
-
-      this.sendSyncMessage(
-        {
-          type: 'loadDataSourceField',
-          key: model.get('key'),
-        },
-        {
-          transaction: options.transaction,
-        },
-      );
-    });
-
-    this.app.db.on('dataSourcesFields.afterDestroy', async (model: DataSourcesFieldModel, options) => {
-      model.unload({
-        app: this.app,
-      });
-
-      this.sendSyncMessage(
-        {
-          type: 'removeDataSourceField',
-          key: model.get('key'),
-        },
-        {
-          transaction: options.transaction,
-        },
-      );
-    });
-
-    this.app.db.on(
-      'dataSourcesCollections.afterSaveWithAssociations',
-      async (model: DataSourcesCollectionModel, { transaction }) => {
-        await model.load({
-          app: this.app,
-          transaction,
-        });
-      },
-    );
-
-    this.app.db.on('dataSources.afterDestroy', async (model: DataSourceModel, options) => {
-      this.app.dataSourceManager.dataSources.delete(model.get('key'));
-
-      this.sendSyncMessage(
-        {
-          type: 'removeDataSource',
-          dataSourceKey: model.get('key'),
-        },
-        {
-          transaction: options.transaction,
-        },
-      );
-    });
-
-    this.app.on('afterStart', async (app: Application) => {
-      const dataSourcesRecords: DataSourceModel[] = await this.app.db.getRepository('dataSources').find({
-        filter: {
-          enabled: true,
-        },
-      });
-
-      const loadPromises = dataSourcesRecords.map((dataSourceRecord) => {
-        if (dataSourceRecord.isMainRecord()) {
-          return dataSourceRecord.loadIntoACL({ app, acl: app.acl });
-        }
-
-        return dataSourceRecord.loadIntoApplication({ app, loadAtAfterStart: true });
-      });
-
-      this.app.setMaintainingMessage('Loading data sources...');
-      await Promise.all(loadPromises);
-    });
-
-    this.app.db.on(
-      'dataSourcesRolesResources.afterSaveWithAssociations',
-      async (model: DataSourcesRolesResourcesModel, options) => {
-        const { transaction } = options;
-
-        const dataSource = this.app.dataSourceManager.dataSources.get(model.get('dataSourceKey'));
-        await model.writeToACL({
-          acl: dataSource.acl,
-          transaction: transaction,
-        });
-
-        // sync roles resources between nodes
-        this.sendSyncMessage(
-          {
-            type: 'syncRoleResource',
-            roleName: model.get('roleName'),
-            dataSourceKey: model.get('dataSourceKey'),
-            resourceName: model.get('name'),
-          },
-          {
-            transaction,
-          },
-        );
-      },
-    );
-
-    this.app.db.on('dataSourcesRolesResourcesScopes.afterSaveWithAssociations', async (model, options) => {
-      const { transaction } = options;
-      const dataSourcesRolesResourcesActions: DataSourcesRolesResourcesActionModel[] = await this.app.db
-        .getRepository('dataSourcesRolesResourcesActions')
-        .find({
-          filter: { scopeId: model.get('id') },
-          transaction,
-        });
-      const rolesRolesResourceIds = dataSourcesRolesResourcesActions.map((x) => x.get('rolesResourceId'));
-      const dataSourcesRolesResources: DataSourcesRolesResourcesModel[] = await this.app.db
-        .getRepository('dataSourcesRolesResources')
-        .find({
-          filter: {
-            id: rolesRolesResourceIds,
-          },
-          transaction,
-        });
-      for (const instance of dataSourcesRolesResources) {
-        await this.app.db.emitAsync(`dataSourcesRolesResources.afterSaveWithAssociations`, instance, {
-          ...options,
-          transaction,
-        });
-      }
-    });
-
-    this.app.db.on(
-      'dataSourcesRolesResourcesActions.afterUpdateWithAssociations',
-      async (model: DataSourcesRolesResourcesActionModel, options) => {
-        const { transaction } = options;
-
-        const resource: DataSourcesRolesResourcesModel = await model.getResource({
-          transaction,
-        });
-
-        const dataSource = this.app.dataSourceManager.dataSources.get(resource.get('dataSourceKey'));
-        await resource.writeToACL({
-          acl: dataSource.acl,
-          transaction: transaction,
-        });
-
-        this.sendSyncMessage(
-          {
-            type: 'syncRoleResource',
-            roleName: resource.get('roleName'),
-            dataSourceKey: resource.get('dataSourceKey'),
-            resourceName: resource.get('name'),
-          },
-          {
-            transaction,
-          },
-        );
-      },
-    );
-
-    this.app.db.on('dataSourcesRolesResources.afterDestroy', async (model: DataSourcesRolesResourcesModel, options) => {
-      const dataSource = this.app.dataSourceManager.dataSources.get(model.get('dataSourceKey'));
-      const roleName = model.get('roleName');
-      const role = dataSource.acl.getRole(roleName);
-
-      if (role) {
-        role.revokeResource(model.get('name'));
-      }
-
-      this.sendSyncMessage(
-        {
-          type: 'syncRoleResource',
-          roleName,
-          dataSourceKey: model.get('dataSourceKey'),
-          resourceName: model.get('name'),
-        },
-        {
-          transaction: options.transaction,
-        },
-      );
-    });
-
-    this.app.db.on('dataSourcesRoles.afterSave', async (model: DataSourcesRolesModel, options) => {
-      const { transaction } = options;
-
-      const dataSource = this.app.dataSourceManager.dataSources.get(model.get('dataSourceKey'));
-
-      await model.writeToAcl({
-        acl: dataSource.acl,
-        transaction,
-      });
-
-      await this.app.db.getRepository('roles').update({
-        filter: {
-          name: model.get('roleName'),
-        },
-        values: {
-          strategy: model.get('strategy'),
-        },
-        hooks: false,
-        transaction,
-      });
-
-      // sync role between nodes
-      this.sendSyncMessage(
-        {
-          type: 'syncRole',
-          roleName: model.get('roleName'),
-          dataSourceKey: model.get('dataSourceKey'),
-        },
-        {
-          transaction,
-        },
-      );
-    });
-
-    this.app.on('acl:writeResources', async ({ roleName, transaction }) => {
-      const dataSource = this.app.dataSourceManager.dataSources.get('main');
-
-      const dataSourceRole: DataSourcesRolesModel = await this.app.db.getRepository('dataSourcesRoles').findOne({
-        filter: {
-          dataSourceKey: 'main',
-          roleName,
-        },
-        transaction,
-      });
-
-      await dataSourceRole.writeToAcl({
-        acl: dataSource.acl,
-        transaction,
-      });
-    });
-
-    // add global roles check
-    this.app.resourceManager.use(async function appendDataToRolesCheck(ctx, next) {
-      const action = ctx.action;
-      await next();
-      const { resourceName, actionName } = action.params;
-      if (resourceName === 'roles' && actionName == 'check') {
-        const roleNames = ctx.state.currentRoles;
-        const dataSources = await ctx.db.getRepository('dataSources').find();
-
-        ctx.bodyMeta = {
-          dataSources: dataSources.reduce((carry, dataSourceModel) => {
-            const dataSource = self.app.dataSourceManager.dataSources.get(dataSourceModel.get('key'));
-            if (!dataSource) {
-              return carry;
-            }
-
-            const dataSourceStatus = self.dataSourceStatus[dataSourceModel.get('key')];
-            if (dataSourceStatus !== 'loaded') {
-              return carry;
-            }
-
-            const aclInstance = dataSource.acl;
-            const roleInstances = aclInstance.getRoles(roleNames);
-            const dataObj = mergeRole(roleInstances);
-
-            carry[dataSourceModel.get('key')] = dataObj;
-
-            return carry;
-          }, {}),
-        };
-      }
     });
 
     this.app.acl.registerSnippet({

@@ -1,0 +1,17 @@
+{
+  "MSSQL Server": "MSSQL Server",
+  "Host": "Host",
+  "Port": "Port", 
+  "Username": "Username",
+  "Password": "Password",
+  "Database": "Database",
+  "Schema": "Schema",
+  "Advanced Options": "Advanced Options",
+  "Trust Server Certificate": "Trust Server Certificate",
+  "Enable Encryption": "Enable Encryption", 
+  "Connection Timeout (ms)": "Connection Timeout (ms)",
+  "Default schema name, usually \"dbo\"": "Default schema name, usually \"dbo\"",
+  "Test connection successful": "Test connection successful",
+  "Test connection failed": "Test connection failed",
+  "MSSQL connection test passed": "MSSQL connection test passed"
+}

@@ -9,3 +9,4 @@
 
 export { default } from './plugin';
 export * from './utils';
+export * from './data-sources/mssql-data-source';
